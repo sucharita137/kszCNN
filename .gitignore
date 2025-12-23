@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large files (optional)
+*.npy
+*.h5
+*.hdf5
+
+# Torch / checkpoints
+checkpoints/
+*.pth
