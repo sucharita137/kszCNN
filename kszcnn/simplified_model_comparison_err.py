@@ -1,7 +1,4 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
+# In[27]:
 
 
 import os, time, random
@@ -17,16 +14,13 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split, Subset
 from sklearn.model_selection import train_test_split
 
-# In[3]:
-
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
-
-# In[22]:
+# In[2]:
 
 
 GRID_FILE = os.path.join(DATA_DIR,"Grids_Mcdm_IllustrisTNG_1P_128_z=0.0.npy")
@@ -37,7 +31,8 @@ TEST_REAL_IDX  = 14
 TRAIN_HALO_FILE = os.path.join(DATA_DIR,"groups_090_1P_0.hdf5")
 TEST_HALO_FILE  = os.path.join(DATA_DIR,"groups_090_1P_p2_n1.hdf5")
 
-# In[3]:
+
+# In[29]:
 
 
 PATCH = 32
@@ -58,7 +53,7 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
 
 
-# In[4]:
+# In[30]:
 
 
 def memmap_grid_slices(grid_file, idxs):
@@ -67,7 +62,7 @@ def memmap_grid_slices(grid_file, idxs):
     return [np.asarray(arr[i], dtype=np.float32) for i in idxs]
 
 
-# In[5]:
+# In[31]:
 
 
 def load_halos(hfile):
@@ -78,7 +73,7 @@ def load_halos(hfile):
     return pos, vel, mass
 
 
-# In[6]:
+# In[32]:
 
 
 def smooth_density_kspace(rho_cdm, R_smooth, boxsize=BOXSIZE):
@@ -95,7 +90,7 @@ def smooth_density_kspace(rho_cdm, R_smooth, boxsize=BOXSIZE):
     return ifftn(dk * W).real.astype(np.float32)
 
 
-# In[7]:
+# In[33]:
 
 
 def compute_vlin_from_density(rho_cdm, z_snap=0.0, boxsize=BOXSIZE,
@@ -120,7 +115,7 @@ def compute_vlin_from_density(rho_cdm, z_snap=0.0, boxsize=BOXSIZE,
     return vz_x.astype(np.float32)
 
 
-# In[8]:
+# In[34]:
 
 
 def build_vlin_interpolator(vlin_grid):
@@ -131,7 +126,7 @@ def build_vlin_interpolator(vlin_grid):
                                    bounds_error=False, fill_value=0.0)
 
 
-# In[9]:
+# In[35]:
 
 
 def smooth_velocity_grid(vz_grid, R_smooth):
@@ -150,7 +145,7 @@ def smooth_velocity_grid(vz_grid, R_smooth):
     return ifftn(dk * W).real.astype(np.float32)
 
 
-# In[10]:
+# In[36]:
 
 
 def vlin_at_halos(vlin_grid, halo_pos):
@@ -160,7 +155,7 @@ def vlin_at_halos(vlin_grid, halo_pos):
     return np.array(vals, dtype=np.float32)
 
 
-# In[11]:
+# In[37]:
 
 
 def extract_patch(grid, center, patch, boxsize):
@@ -176,10 +171,6 @@ def extract_patch(grid, center, patch, boxsize):
     zs = [(idx[2] + i) % N for i in range(-r, r)]
 
     return grid[np.ix_(xs, ys, zs)]
-
-
-# In[39]:
-
 
 def redshift_err(pos, sigma_z=1e-4, H0=67.7, h=0.677, c=3e5):
 
@@ -201,58 +192,88 @@ def redshift_err(pos, sigma_z=1e-4, H0=67.7, h=0.677, c=3e5):
 
     return pos_err
 
-
-# In[13]:
+# In[38]:
 
 
 class HaloDataset(Dataset):
 
-    def __init__(self, density_grid, pos, vel,mass, 
+    def __init__(self, density_grid, pos, vel, mass,
+                 mode="density",
                  patch=PATCH, boxsize=BOXSIZE,
-                 mass_cut=MASS_CUT, max_n=MAX_HALOS,rng=None): # vel replaced by vz_smooth
-
+                 mass_cut=MASS_CUT, max_n=MAX_HALOS, rng=None):
         if rng is None:
             rng = np.random.RandomState(SEED)
         mask = mass > mass_cut
-        pos, vel = pos[mask], vel[mask]
+        pos, vel, mass = pos[mask], vel[mask], mass[mask]
 
-        
         if max_n is not None and len(pos) > max_n:
             sel = rng.choice(len(pos), max_n, replace=False)
-            pos, vel = pos[sel], vel[sel]
-
-
+            pos, vel, mass = pos[sel], vel[sel], mass[sel]
+            
+        self.mode = mode
         self.grid = density_grid
         self.pos = pos
-        self.vz = vel[:,2].astype(np.float32) 
+        self.mass = mass
+
+        self.vz = vel[:, 2].astype(np.float32)
 
         self.patch = patch
         self.boxsize = boxsize
+
+        # Normalize log mass globally 
+        log_mass = np.log10(self.mass)
+        self.mass_mean = log_mass.mean()
+        self.mass_std = log_mass.std() + 1e-6
 
         print(f"Selected halos: {len(self.pos)}")
 
     def __len__(self):
         return len(self.pos)
-
     def __getitem__(self, i):
+        inputs = []
 
-        patch = extract_patch(
-            self.grid,
-            self.pos[i],
-            self.patch,
-            self.boxsize
-        )
+        #  Density 
+        if "density" in self.mode:
+            patch = extract_patch(self.grid, self.pos[i], self.patch, self.boxsize)
+            patch = (patch - patch.mean()) / (patch.std() + 1e-6)
+            inputs.append(patch)
 
-        # local normalization
-        patch = (patch - patch.mean()) / (patch.std() + 1e-6)
+        #  Position 
+        if "pos" in self.mode:
+            Ngrid = self.grid.shape[0]
+            cell = self.boxsize / Ngrid
 
-        x = torch.tensor(patch[None], dtype=torch.float32)
+            center_idx = (self.pos[i] / cell - 0.5)
+            r = self.patch // 2
+            coords = np.arange(-r, r)
+
+            xg, yg, zg = np.meshgrid(coords, coords, coords, indexing='ij')
+
+            xg = (xg + center_idx[0]) % Ngrid
+            yg = (yg + center_idx[1]) % Ngrid
+            zg = (zg + center_idx[2]) % Ngrid
+
+            xg = (xg * cell) / self.boxsize
+            yg = (yg * cell) / self.boxsize
+            zg = (zg * cell) / self.boxsize
+
+            inputs.extend([xg, yg, zg])
+
+        #  Halo mass 
+        if "mass" in self.mode:
+            logm = (np.log10(self.mass[i]) - self.mass_mean) / self.mass_std
+            mchan = np.full_like(inputs[0], logm)
+            inputs.append(mchan)
+
+        x_all = np.stack(inputs, axis=0)
+
+        x = torch.tensor(x_all, dtype=torch.float32)
         y = torch.tensor(self.vz[i], dtype=torch.float32)
 
         return x, y
 
 
-# In[14]:
+# In[39]:
 
 
 class CNN(nn.Module):
@@ -290,10 +311,9 @@ class CNN(nn.Module):
         x = self.pool(x)
         x = x.flatten(1)
         return self.fc(x).view(-1)
-        # return self.fc(x).squeeze()
 
 
-# In[15]:
+# In[40]:
 
 
 def pearson_corr_torch(x, y, eps=1e-6):
@@ -309,7 +329,7 @@ def pearson_corr_torch(x, y, eps=1e-6):
     return corr
 
 
-# In[16]:
+# In[41]:
 
 
 def _compute_stats(true, pred):
@@ -328,10 +348,11 @@ def _compute_stats(true, pred):
     return mask, rmse, rms_true, rms_pred, n
 
 
-# In[17]:
+# In[51]:
 
 
-def hexbin_panel(ax, true, pred, title, cmap="viridis"):
+def hexbin_panel(ax, true, pred, title, lims=None, cmap="viridis"):
+
     mask, rmse, rms_true, rms_pred, n = _compute_stats(true, pred)
     
     # residuals 
@@ -342,8 +363,8 @@ def hexbin_panel(ax, true, pred, title, cmap="viridis"):
     p68 = np.percentile(abs_res, 68)
     p95 = np.percentile(abs_res, 95)
     p99 = np.percentile(abs_res, 99)
-    
-    vmax = max(np.max(np.abs(true[mask])), np.max(np.abs(pred[mask]))) if n > 0 else 1.0
+
+    vmax = max(np.max(np.abs(true[mask])), np.max(np.abs(pred[mask])))
     lims = [-vmax, vmax]
 
     hb = ax.hexbin(
@@ -355,9 +376,11 @@ def hexbin_panel(ax, true, pred, title, cmap="viridis"):
         extent=(lims[0], lims[1], lims[0], lims[1])
     )
 
-    ax.plot(lims, lims, 'r--', lw=1.2, label="1:1")
-    ax.set_xlim(lims); ax.set_ylim(lims)
-    ax.set_aspect('equal', adjustable='box')
+    ax.plot(lims, lims, 'r--', lw=1.2)
+    ax.set_xlim(lims)
+    ax.set_ylim(lims)
+    ax.set_aspect('equal')
+
     ax.set_xlabel("True LOS velocity (km/s)")
     ax.set_ylabel("Predicted LOS velocity (km/s)")
     ax.set_title(title)
@@ -372,17 +395,39 @@ def hexbin_panel(ax, true, pred, title, cmap="viridis"):
     ax.text(
         0.02, 0.98, stats_text,
         transform=ax.transAxes,
-        fontsize=9,
+        fontsize=10,
         va='top',
-        bbox=dict(boxstyle="round", fc="white", ec="black", alpha=0.85)
+        bbox=dict(boxstyle="round", fc="white", ec="black", alpha=0.9)
     )
+
     return hb
 
 
+# In[43]:
 
 
+INPUT_MODES = {
+    "density": 1,
+    "density_pos": 4,
+    "density_pos_mass": 5,
+    "pos_mass": 4,
+    "pos": 3,
+}
 
-# In[46]:
+
+# In[44]:
+
+
+MODEL_TITLES = {
+    "density": "Density",
+    "density_pos": "Density + Position",
+    "density_pos_mass": "Density + Position + Mass",
+    "pos_mass": "Position + Mass",
+    "pos": "Position"
+}
+
+
+# In[45]:
 
 
 def train_model(model, tr_loader, val_loader, y_mean, y_std):
@@ -425,7 +470,7 @@ def train_model(model, tr_loader, val_loader, y_mean, y_std):
         train_pred = np.concatenate(train_pred)
         train_true = np.concatenate(train_true)
 
-        # train_rho = pearsonr(train_true, train_pred)[0]
+        #train_rho = pearsonr(train_true, train_pred)[0]
 
         #  validation 
         model.eval()
@@ -468,127 +513,127 @@ def train_model(model, tr_loader, val_loader, y_mean, y_std):
     return model
 
 
+# In[46]:
+
+
+#print(f"\nTrain realization: {TRAIN_REAL_IDX}")
+#print(f"Test realization:  {TEST_REAL_IDX}")
+
+
 # In[47]:
 
 
-def evaluate_model(model, te_loader, test_ds,
-                   y_mean, y_std,
-                   vlin_baseline, rho_vlin):
+def run_experiment(mode, train_real, test_real):
 
-    model.load_state_dict(
-        torch.load(CHECKPOINT_DIR + "/best.pth")
+    #  FIX RANDOMNESS
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+    random.seed(SEED)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(SEED)
+        torch.cuda.manual_seed_all(SEED)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    print(f"\nRunning model: {mode}")
+
+    # load grids
+    grid_train, grid_test = memmap_grid_slices(
+        GRID_FILE, [train_real, test_real]
     )
 
-    model.eval()
+    delta_train = smooth_density_kspace(grid_train, SMOOTH_SCALE)
+    delta_test  = smooth_density_kspace(grid_test, SMOOTH_SCALE)
 
+    # halos
+    pos_tr, vel_tr, mass_tr = load_halos(TRAIN_HALO_FILE)
+    pos_te, vel_te, mass_te = load_halos(TEST_HALO_FILE)
+    
+
+    pos_tr = redshift_err(pos_tr, sigma_z=1e-4)
+    pos_te = redshift_err(pos_te, sigma_z=1e-4)
+
+
+    train_ds = HaloDataset(delta_train, pos_tr, vel_tr, mass_tr, mode=mode)
+    test_ds  = HaloDataset(delta_test, pos_te, vel_te, mass_te, mode=mode)
+
+    # split
+    idxs = np.arange(len(train_ds))
+    tr_idx, val_idx = train_test_split(idxs, test_size=0.2, random_state=SEED)
+
+    tr_ds = Subset(train_ds, tr_idx)
+    val_ds = Subset(train_ds, val_idx)
+
+    tr_loader = DataLoader(tr_ds, batch_size=BATCH, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=BATCH)
+    te_loader  = DataLoader(test_ds, batch_size=BATCH)
+
+    # model
+    model = CNN(in_ch=INPUT_MODES[mode]).to(DEVICE)
+
+    # velocity normalization
+    y_train = np.array([train_ds[i][1] for i in tr_idx])
+    y_mean = y_train.mean()
+    y_std  = y_train.std() + 1e-12
+
+    train_model(model, tr_loader, val_loader, y_mean, y_std)
+
+    # Linear baseline 
+    vlin_test = compute_vlin_from_density(grid_test, R_smooth=SMOOTH_SCALE)
+    vlin_baseline = vlin_at_halos(vlin_test, test_ds.pos)
+
+    # CNN prediction 
     preds = []
-
     with torch.no_grad():
-        for xb, y in te_loader:
-
+        for xb, _ in te_loader:
             xb = xb.to(DEVICE)
-
-            pred = model(xb)
-            pred = pred.cpu().numpy() * y_std + y_mean
-
+            pred = model(xb).cpu().numpy() * y_std + y_mean
             preds.append(pred)
 
     preds = np.concatenate(preds)
-    true = test_ds.vz 
-    
-    # Residual histogram
-    residual_cnn = preds - true
+    true = test_ds.vz
+
+    #  Metrics 
+    def metrics(true, pred):
+        rmse = np.sqrt(np.mean((pred - true) ** 2))
+        rms_true = np.std(true)
+        rms_pred = np.std(pred)
+        return rmse, rms_true, rms_pred
+
+
+    rmse_lin, rms_true, rms_lin = metrics(true, vlin_baseline)
+    rmse_cnn, _, rms_cnn = metrics(true, preds)
+
+    # residuals
     residual_lin = vlin_baseline - true
+    residual_cnn = preds - true
 
-    plt.figure(figsize=(6,5))
-    plt.hist(residual_cnn, bins=50, alpha=0.6, label="CNN")
-    plt.hist(residual_lin, bins=50, alpha=0.6, label="Linear")
-    plt.xlabel("Velocity residual (km/s)")
-    plt.ylabel("Counts")
-    plt.legend()
-    plt.title("Velocity residual distribution")
-    plt.show()
+    # percentile errors
+    p68_lin = np.percentile(np.abs(residual_lin), 68)
+    p95_lin = np.percentile(np.abs(residual_lin), 95)
 
-    #Residual vs true
-    plt.figure(figsize=(6,5))
-    plt.scatter(true, residual_cnn, s=5, alpha=0.5)
-    plt.axhline(0, color='red', linestyle='--')
-    plt.xlabel("True velocity")
-    plt.ylabel("Residual (pred - true)")
-    plt.title("Residual vs True")
-    plt.show()
+    p68_cnn = np.percentile(np.abs(residual_cnn), 68)
+    p95_cnn = np.percentile(np.abs(residual_cnn), 95)
 
-    #Percentile errors
-    abs_res = np.abs(residual_cnn)
-    p68 = np.percentile(abs_res, 68)
-    p95 = np.percentile(abs_res, 95)
-    p99 = np.percentile(abs_res, 99)
-    print("p68 =", p68)
-    print("p95 =", p95)
-    print("p99 =", p99)
-
-    #Tail points
-    threshold = np.percentile(abs_res, 95)
-    tail_mask = abs_res > threshold
-    tail_true = true[tail_mask]
-    tail_pred = preds[tail_mask]
-
-    plt.figure(figsize=(6,5))
-    plt.scatter(true, preds, s=5, alpha=0.5)
-    plt.scatter(tail_true, tail_pred, color='red', s=10)
-    plt.plot([-500,500], [-500,500], 'k--')
-    plt.xlabel("True velocity")
-    plt.ylabel("Predicted velocity")
-    plt.title("High scatter tail points")
-    plt.show()
+    p99_cnn = np.percentile(np.abs(residual_cnn), 99)
 
 
-    rmse = np.sqrt(np.mean((preds - true)**2))
-    rms_true = np.std(true)
-    rms_pred = np.std(preds)
-    N = len(true)
-
-    print("\n===== TEST RESULTS =====")
-    print(f"N = {N}")
-    print(f"RMSE = {rmse:.3f}")
-    print(f"RMS(true) = {rms_true:.3f}")
-    print(f"RMS(pred) = {rms_pred:.3f}")
-    # plots
-    fig, ax = plt.subplots(1,2, figsize=(12,5))
-
-    hb0 = hexbin_panel(ax[0], true, vlin_baseline, "Linear")
-    hb1 = hexbin_panel(ax[1], true, preds, "CNN")
-
-    cb0 = fig.colorbar(hb0, ax=ax[0])
-    cb0.set_label("Counts")
-
-    cb1 = fig.colorbar(hb1, ax=ax[1])
-    cb1.set_label("Counts")
-
-    plt.tight_layout()
-    plt.show()
-
-
-# In[48]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
+    return (
+        rms_true,
+        rms_lin,
+        rms_cnn,
+        rmse_lin,
+        rmse_cnn,
+        p68_lin,
+        p95_lin,
+        p68_cnn,
+        p95_cnn,
+        p99_cnn,
+        true,
+        vlin_baseline,
+        preds
+        )
 
 

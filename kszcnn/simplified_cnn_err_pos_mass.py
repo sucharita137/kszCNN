@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
 # In[1]:
 
 
@@ -17,16 +14,13 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split, Subset
 from sklearn.model_selection import train_test_split
 
-# In[3]:
-
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
-
-# In[22]:
+# In[2]:
 
 
 GRID_FILE = os.path.join(DATA_DIR,"Grids_Mcdm_IllustrisTNG_1P_128_z=0.0.npy")
@@ -177,10 +171,6 @@ def extract_patch(grid, center, patch, boxsize):
 
     return grid[np.ix_(xs, ys, zs)]
 
-
-# In[39]:
-
-
 def redshift_err(pos, sigma_z=1e-4, H0=67.7, h=0.677, c=3e5):
 
     # convert to Mpc
@@ -202,7 +192,7 @@ def redshift_err(pos, sigma_z=1e-4, H0=67.7, h=0.677, c=3e5):
     return pos_err
 
 
-# In[13]:
+# In[12]:
 
 
 class HaloDataset(Dataset):
@@ -214,20 +204,25 @@ class HaloDataset(Dataset):
         if rng is None:
             rng = np.random.RandomState(SEED)
         mask = mass > mass_cut
-        pos, vel = pos[mask], vel[mask]
+        pos, vel, mass = pos[mask], vel[mask], mass[mask]
 
-        
         if max_n is not None and len(pos) > max_n:
             sel = rng.choice(len(pos), max_n, replace=False)
-            pos, vel = pos[sel], vel[sel]
-
+            pos, vel, mass = pos[sel], vel[sel], mass[sel]
 
         self.grid = density_grid
         self.pos = pos
-        self.vz = vel[:,2].astype(np.float32) 
+        self.mass = mass
+
+        self.vz = vel[:, 2].astype(np.float32)
 
         self.patch = patch
         self.boxsize = boxsize
+
+        # Normalize log mass globally 
+        log_mass = np.log10(self.mass)
+        self.mass_mean = log_mass.mean()
+        self.mass_std = log_mass.std() + 1e-6
 
         print(f"Selected halos: {len(self.pos)}")
 
@@ -236,28 +231,44 @@ class HaloDataset(Dataset):
 
     def __getitem__(self, i):
 
-        patch = extract_patch(
-            self.grid,
-            self.pos[i],
-            self.patch,
-            self.boxsize
-        )
+        # coordinate channels
+        Ngrid = self.grid.shape[0]
+        cell = self.boxsize / Ngrid
 
-        # local normalization
-        patch = (patch - patch.mean()) / (patch.std() + 1e-6)
+        center_idx = (self.pos[i] / cell - 0.5)
+        r = self.patch // 2
+        coords = np.arange(-r, r)
 
-        x = torch.tensor(patch[None], dtype=torch.float32)
+        xg, yg, zg = np.meshgrid(coords, coords, coords, indexing='ij')
+
+        xg = (xg + center_idx[0]) % Ngrid
+        yg = (yg + center_idx[1]) % Ngrid
+        zg = (zg + center_idx[2]) % Ngrid
+
+        # normalize positions
+        xg = (xg * cell) / self.boxsize
+        yg = (yg * cell) / self.boxsize
+        zg = (zg * cell) / self.boxsize
+
+        # halo mass channel
+        logm = (np.log10(self.mass[i]) - self.mass_mean) / self.mass_std
+        mchan = np.full_like(xg, logm)
+
+        #stack
+        x_all = np.stack([xg, yg, zg, mchan], axis=0)
+
+        x = torch.tensor(x_all, dtype=torch.float32)
         y = torch.tensor(self.vz[i], dtype=torch.float32)
 
         return x, y
 
 
-# In[14]:
+# In[13]:
 
 
 class CNN(nn.Module):
 
-    def __init__(self, in_ch=1):
+    def __init__(self, in_ch=4):
         super().__init__()
 
         self.conv = nn.Sequential(
@@ -290,10 +301,9 @@ class CNN(nn.Module):
         x = self.pool(x)
         x = x.flatten(1)
         return self.fc(x).view(-1)
-        # return self.fc(x).squeeze()
 
 
-# In[15]:
+# In[14]:
 
 
 def pearson_corr_torch(x, y, eps=1e-6):
@@ -309,7 +319,7 @@ def pearson_corr_torch(x, y, eps=1e-6):
     return corr
 
 
-# In[16]:
+# In[15]:
 
 
 def _compute_stats(true, pred):
@@ -328,7 +338,7 @@ def _compute_stats(true, pred):
     return mask, rmse, rms_true, rms_pred, n
 
 
-# In[17]:
+# In[16]:
 
 
 def hexbin_panel(ax, true, pred, title, cmap="viridis"):
@@ -380,9 +390,7 @@ def hexbin_panel(ax, true, pred, title, cmap="viridis"):
 
 
 
-
-
-# In[46]:
+# In[26]:
 
 
 def train_model(model, tr_loader, val_loader, y_mean, y_std):
@@ -425,7 +433,7 @@ def train_model(model, tr_loader, val_loader, y_mean, y_std):
         train_pred = np.concatenate(train_pred)
         train_true = np.concatenate(train_true)
 
-        # train_rho = pearsonr(train_true, train_pred)[0]
+        #train_rho = pearsonr(train_true, train_pred)[0]
 
         #  validation 
         model.eval()
@@ -468,7 +476,7 @@ def train_model(model, tr_loader, val_loader, y_mean, y_std):
     return model
 
 
-# In[47]:
+# In[27]:
 
 
 def evaluate_model(model, te_loader, test_ds,
@@ -541,8 +549,8 @@ def evaluate_model(model, te_loader, test_ds,
     plt.ylabel("Predicted velocity")
     plt.title("High scatter tail points")
     plt.show()
-
-
+    
+    
     rmse = np.sqrt(np.mean((preds - true)**2))
     rms_true = np.std(true)
     rms_pred = np.std(preds)
@@ -567,28 +575,6 @@ def evaluate_model(model, te_loader, test_ds,
 
     plt.tight_layout()
     plt.show()
-
-
-# In[48]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
 
 
 

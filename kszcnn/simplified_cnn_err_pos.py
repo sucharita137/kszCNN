@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
 # In[1]:
 
 
@@ -17,16 +14,13 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split, Subset
 from sklearn.model_selection import train_test_split
 
-# In[3]:
-
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
-
-# In[22]:
+# In[2]:
 
 
 GRID_FILE = os.path.join(DATA_DIR,"Grids_Mcdm_IllustrisTNG_1P_128_z=0.0.npy")
@@ -36,6 +30,7 @@ TEST_REAL_IDX  = 14
 
 TRAIN_HALO_FILE = os.path.join(DATA_DIR,"groups_090_1P_0.hdf5")
 TEST_HALO_FILE  = os.path.join(DATA_DIR,"groups_090_1P_p2_n1.hdf5")
+
 
 # In[3]:
 
@@ -178,9 +173,6 @@ def extract_patch(grid, center, patch, boxsize):
     return grid[np.ix_(xs, ys, zs)]
 
 
-# In[39]:
-
-
 def redshift_err(pos, sigma_z=1e-4, H0=67.7, h=0.677, c=3e5):
 
     # convert to Mpc
@@ -202,7 +194,7 @@ def redshift_err(pos, sigma_z=1e-4, H0=67.7, h=0.677, c=3e5):
     return pos_err
 
 
-# In[13]:
+# In[12]:
 
 
 class HaloDataset(Dataset):
@@ -236,28 +228,40 @@ class HaloDataset(Dataset):
 
     def __getitem__(self, i):
 
-        patch = extract_patch(
-            self.grid,
-            self.pos[i],
-            self.patch,
-            self.boxsize
-        )
+        # coordinate channels only 
+        Ngrid = self.grid.shape[0]
+        cell = self.boxsize / Ngrid
 
-        # local normalization
-        patch = (patch - patch.mean()) / (patch.std() + 1e-6)
+        center_idx = (self.pos[i] / cell - 0.5)
+        r = self.patch // 2
+        coords = np.arange(-r, r)
 
-        x = torch.tensor(patch[None], dtype=torch.float32)
+        xg, yg, zg = np.meshgrid(coords, coords, coords, indexing='ij')
+
+        xg = (xg + center_idx[0]) % Ngrid
+        yg = (yg + center_idx[1]) % Ngrid
+        zg = (zg + center_idx[2]) % Ngrid
+
+        # normalize to [0,1]
+        xg = (xg * cell) / self.boxsize
+        yg = (yg * cell) / self.boxsize
+        zg = (zg * cell) / self.boxsize
+
+        #stack
+        x_all = np.stack([xg, yg, zg], axis=0)
+
+        x = torch.tensor(x_all, dtype=torch.float32)
         y = torch.tensor(self.vz[i], dtype=torch.float32)
 
         return x, y
 
 
-# In[14]:
+# In[13]:
 
 
 class CNN(nn.Module):
 
-    def __init__(self, in_ch=1):
+    def __init__(self, in_ch=3):
         super().__init__()
 
         self.conv = nn.Sequential(
@@ -290,10 +294,9 @@ class CNN(nn.Module):
         x = self.pool(x)
         x = x.flatten(1)
         return self.fc(x).view(-1)
-        # return self.fc(x).squeeze()
 
 
-# In[15]:
+# In[14]:
 
 
 def pearson_corr_torch(x, y, eps=1e-6):
@@ -309,7 +312,7 @@ def pearson_corr_torch(x, y, eps=1e-6):
     return corr
 
 
-# In[16]:
+# In[15]:
 
 
 def _compute_stats(true, pred):
@@ -328,7 +331,7 @@ def _compute_stats(true, pred):
     return mask, rmse, rms_true, rms_pred, n
 
 
-# In[17]:
+# In[16]:
 
 
 def hexbin_panel(ax, true, pred, title, cmap="viridis"):
@@ -342,6 +345,7 @@ def hexbin_panel(ax, true, pred, title, cmap="viridis"):
     p68 = np.percentile(abs_res, 68)
     p95 = np.percentile(abs_res, 95)
     p99 = np.percentile(abs_res, 99)
+    
     
     vmax = max(np.max(np.abs(true[mask])), np.max(np.abs(pred[mask]))) if n > 0 else 1.0
     lims = [-vmax, vmax]
@@ -381,8 +385,7 @@ def hexbin_panel(ax, true, pred, title, cmap="viridis"):
 
 
 
-
-# In[46]:
+# In[26]:
 
 
 def train_model(model, tr_loader, val_loader, y_mean, y_std):
@@ -425,9 +428,9 @@ def train_model(model, tr_loader, val_loader, y_mean, y_std):
         train_pred = np.concatenate(train_pred)
         train_true = np.concatenate(train_true)
 
-        # train_rho = pearsonr(train_true, train_pred)[0]
+        #train_rho = pearsonr(train_true, train_pred)[0]
 
-        #  validation 
+        #  validation
         model.eval()
         val_loss = 0
         val_pred, val_true = [], []
@@ -468,7 +471,7 @@ def train_model(model, tr_loader, val_loader, y_mean, y_std):
     return model
 
 
-# In[47]:
+# In[27]:
 
 
 def evaluate_model(model, te_loader, test_ds,
@@ -541,8 +544,8 @@ def evaluate_model(model, te_loader, test_ds,
     plt.ylabel("Predicted velocity")
     plt.title("High scatter tail points")
     plt.show()
-
-
+    
+    
     rmse = np.sqrt(np.mean((preds - true)**2))
     rms_true = np.std(true)
     rms_pred = np.std(preds)
@@ -567,28 +570,4 @@ def evaluate_model(model, te_loader, test_ds,
 
     plt.tight_layout()
     plt.show()
-
-
-# In[48]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
 
